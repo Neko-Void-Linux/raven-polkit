@@ -1,0 +1,7 @@
+# Binarios compilados
+polkit-agent
+polkit-prompt
+
+# Objetos/depencias
+*.o
+*.so
