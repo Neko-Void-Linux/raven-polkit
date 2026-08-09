@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <gtk/gtk.h>
+#include <locale.h>
 #include "log.h"
 
 /* Logger state for the prompt binary. Default WARN. */
@@ -32,6 +33,8 @@ static void print_usage(const char *argv0) {
 }
 
 int main(int argc, char *argv[]) {
+    setlocale(LC_ALL, "");
+
     const char *message = "Authentication required";
     const char *user = NULL;
 

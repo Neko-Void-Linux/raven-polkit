@@ -27,11 +27,10 @@ static DBusConnection *g_bus = NULL;
 static volatile sig_atomic_t g_running = 1;
 static pid_t g_auth_child = 0;
 static DBusMessage *g_pending_msg = NULL;
-static int opt_debug = 0;
 
-#define log_error(fmt, ...) fprintf(stderr, "polkit-agent[%d]: ERROR " fmt "\n", getpid(), ##__VA_ARGS__)
-#define log_warn(fmt, ...)  fprintf(stderr, "polkit-agent[%d]: WARN  " fmt "\n", getpid(), ##__VA_ARGS__)
-#define log_debug(fmt, ...) do { if (opt_debug) fprintf(stderr, "polkit-agent[%d]: DEBUG " fmt "\n", getpid(), ##__VA_ARGS__); } while(0)
+#include "log.h"
+log_level_t g_log_level = LL_WARN;
+const char *g_log_prefix = "polkit-agent";
 
 static void sigterm_handler(int sig) {
     (void)sig;
@@ -209,9 +208,15 @@ run_auth_session(const char *cookie, const char *username, uid_t uid, const char
             int n = read(prompt_pipe[0], pwbuf, sizeof(pwbuf) - 1);
             close(prompt_pipe[0]);
 
-            if (n > 0 && pwbuf[n - 1] == '\n') pwbuf[n - 1] = '\0';
+            if (n <= 0) {
+                close(sock);
+                kill(prompt_pid, SIGTERM);
+                waitpid(prompt_pid, NULL, 0); /* Explicitly reap to prevent future zombie leaks */
+                _exit(1);
+            }
+            if (pwbuf[n - 1] == '\n') pwbuf[n - 1] = '\0';
             
-            write(sock, pwbuf, n > 0 ? strlen(pwbuf) : 0);
+            write(sock, pwbuf, strlen(pwbuf));
             write(sock, "\n", 1);
 
             int st;
@@ -412,7 +417,7 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-d") == 0)
-            opt_debug = 1;
+            g_log_level = LL_DEBUG;
     }
     
     prompt_path = PROMPT_DEFAULT_PATH;
