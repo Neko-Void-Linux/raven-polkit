@@ -412,7 +412,7 @@ int main(int argc, char **argv) {
     dbus_error_init(&err);
 
 #ifndef PROMPT_DEFAULT_PATH
-#define PROMPT_DEFAULT_PATH "/usr/lib/raven-polkit-agent-lite/raven-polkit-prompt"
+#define PROMPT_DEFAULT_PATH "/usr/lib/raven-polkit/raven-polkit-prompt"
 #endif
 
     for (int i = 1; i < argc; i++) {
