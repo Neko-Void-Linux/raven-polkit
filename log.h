@@ -2,12 +2,12 @@
 #define POLKIT_AGENT_LITE_LOG_H
 
 /*
- * Minimal syslog-style logger for polkit-agent-lite.
+ * Minimal syslog-style logger for raven-polkit-agent-lite.
  *
  * Output format (single line, tail-friendly):
- *   polkit-agent[1234]: ERROR cannot connect to system bus
- *   polkit-agent[1234]: WARN  auth FAILED for user root (action org.example.x)
- *   polkit-agent[1234]: DEBUG auth OK for user root (action org.example.x)
+ *   raven-polkit-agent[1234]: ERROR cannot connect to system bus
+ *   raven-polkit-agent[1234]: WARN  auth FAILED for user root (action org.example.x)
+ *   raven-polkit-agent[1234]: DEBUG auth OK for user root (action org.example.x)
  *
  * Only two levels reach stderr by default: ERROR and WARN.
  * DEBUG is opt-in at runtime via --debug. There is no INFO level -

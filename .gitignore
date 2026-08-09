@@ -1,6 +1,6 @@
 # Binarios compilados
-polkit-agent
-polkit-prompt
+raven-polkit-agent
+raven-polkit-prompt
 
 # Objetos/depencias
 *.o

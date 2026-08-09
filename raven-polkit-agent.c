@@ -21,7 +21,7 @@
 #define AUTHORITY_NAME  "org.freedesktop.PolicyKit1"
 #define AUTHORITY_OBJ   "/org/freedesktop/PolicyKit1/Authority"
 #define AUTHORITY_IFACE "org.freedesktop.PolicyKit1.Authority"
-#define HELPER_PATH     "/usr/lib/polkit-1/polkit-agent-helper-1"
+#define HELPER_PATH     "/usr/lib/polkit-1/raven-polkit-agent-helper-1"
 
 static DBusConnection *g_bus = NULL;
 static volatile sig_atomic_t g_running = 1;
@@ -30,7 +30,7 @@ static DBusMessage *g_pending_msg = NULL;
 
 #include "log.h"
 log_level_t g_log_level = LL_WARN;
-const char *g_log_prefix = "polkit-agent";
+const char *g_log_prefix = "raven-polkit-agent";
 
 static void sigterm_handler(int sig) {
     (void)sig;
@@ -430,7 +430,7 @@ int main(int argc, char **argv) {
     dbus_error_init(&err);
 
 #ifndef PROMPT_DEFAULT_PATH
-#define PROMPT_DEFAULT_PATH "/usr/lib/polkit-agent-lite/polkit-prompt"
+#define PROMPT_DEFAULT_PATH "/usr/lib/raven-polkit-agent-lite/raven-polkit-prompt"
 #endif
 
     for (int i = 1; i < argc; i++) {

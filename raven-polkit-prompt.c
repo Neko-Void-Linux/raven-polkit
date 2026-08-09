@@ -7,7 +7,7 @@
 
 /* Logger state for the prompt binary. Default WARN. */
 log_level_t g_log_level = LL_WARN;
-const char *g_log_prefix = "polkit-prompt";
+const char *g_log_prefix = "raven-polkit-prompt";
 
 static GtkWidget *entry = NULL;
 static GtkWidget *g_label_msg = NULL;
