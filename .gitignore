@@ -11,3 +11,6 @@ compile_flags.txt
 
 # graphify: knowledge graph de analisis del codigo
 graphify-out/
+
+# Asistente
+AGENTS.md
