@@ -165,75 +165,93 @@ connect_helper_socket(void) {
 
 static void
 run_auth_session(const char *cookie, const char *username, uid_t uid, const char *action_id,
-                  const char *prompt_path) {
-    int sock = connect_helper_socket();
-    if (sock < 0) {
-        log_error("cannot connect to helper socket");
-        _exit(1);
-    }
+                 const char *prompt_path) {
+    int prompt_sock[2] = {-1, -1};
+    pid_t prompt_pid = -1;
 
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
-
-    write(sock, username, strlen(username));
-    write(sock, "\n", 1);
-    write(sock, cookie, strlen(cookie));
-    write(sock, "\n", 1);
-
-    char line[4096];
-
-    while (read_line(sock, line, sizeof(line)) > 0) {
-        if (strncmp(line, "PAM_PROMPT_ECHO_OFF ", 20) == 0) {
-            const char *msg = line + 20;
-            int prompt_pipe[2];
-            if (pipe(prompt_pipe) < 0) break;
-
-            pid_t prompt_pid = fork();
-            if (prompt_pid < 0) { close(prompt_pipe[0]); close(prompt_pipe[1]); break; }
-
-            if (prompt_pid == 0) {
-                close(prompt_pipe[0]);
-                dup2(prompt_pipe[1], STDOUT_FILENO);
-                close(prompt_pipe[1]);
-
-                execlp(prompt_path, prompt_path,
-                       "--message", msg,
-                       "--user", username,
-                       (char *)NULL);
-                _exit(127);
-            }
-
-            close(prompt_pipe[1]);
-            char pwbuf[4096] = {0};
-            int n = read(prompt_pipe[0], pwbuf, sizeof(pwbuf) - 1);
-            close(prompt_pipe[0]);
-
-            if (n <= 0) {
-                close(sock);
-                kill(prompt_pid, SIGTERM);
-                waitpid(prompt_pid, NULL, 0); /* Explicitly reap to prevent future zombie leaks */
-                _exit(1);
-            }
-            if (pwbuf[n - 1] == '\n') pwbuf[n - 1] = '\0';
-            
-            write(sock, pwbuf, strlen(pwbuf));
-            write(sock, "\n", 1);
-
-            int st;
-            waitpid(prompt_pid, &st, 0);
-        } else if (strcmp(line, "SUCCESS") == 0) {
-            log_debug("auth OK for user %s (action %s)", username, action_id);
-            close(sock);
-            _exit(0);
-        } else if (strncmp(line, "ERROR ", 6) == 0) {
-            log_debug("auth err for user %s (action %s): %s", username, action_id, line + 6);
-            close(sock);
-            _exit(1);
+    while (1) {
+        int sock = connect_helper_socket();
+        if (sock < 0) {
+            log_error("cannot connect to helper socket");
+            goto fail;
         }
+
+        int flags = fcntl(sock, F_GETFL, 0);
+        fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
+
+        write(sock, username, strlen(username));
+        write(sock, "\n", 1);
+        write(sock, cookie, strlen(cookie));
+        write(sock, "\n", 1);
+
+        char line[4096];
+        int helper_failed = 0;
+
+        while (read_line(sock, line, sizeof(line)) > 0) {
+            if (strncmp(line, "PAM_PROMPT_ECHO_OFF ", 20) == 0) {
+                if (prompt_pid < 0) {
+                    if (socketpair(AF_UNIX, SOCK_STREAM, 0, prompt_sock) < 0) break;
+
+                    prompt_pid = fork();
+                    if (prompt_pid < 0) { close(prompt_sock[0]); close(prompt_sock[1]); break; }
+
+                    if (prompt_pid == 0) {
+                        close(prompt_sock[0]);
+                        dup2(prompt_sock[1], STDIN_FILENO);
+                        dup2(prompt_sock[1], STDOUT_FILENO);
+                        close(prompt_sock[1]);
+
+                        execlp(prompt_path, prompt_path,
+                               "--message", line + 20,
+                               "--user", username,
+                               (char *)NULL);
+                        _exit(127);
+                    }
+                    close(prompt_sock[1]);
+                }
+
+                char pwbuf[4096] = {0};
+                int n = read(prompt_sock[0], pwbuf, sizeof(pwbuf) - 1);
+                
+                if (n <= 0) {
+                    close(sock);
+                    goto fail;
+                }
+                
+                if (pwbuf[n - 1] == '\n') pwbuf[n - 1] = '\0';
+                
+                write(sock, pwbuf, strlen(pwbuf));
+                write(sock, "\n", 1);
+            } else if (strcmp(line, "SUCCESS") == 0) {
+                log_debug("auth OK for user %s (action %s)", username, action_id);
+                if (prompt_pid > 0) write(prompt_sock[0], "S\n", 2);
+                close(sock);
+                _exit(0);
+            } else if (strncmp(line, "ERROR ", 6) == 0) {
+                log_debug("auth err for user %s (action %s): %s", username, action_id, line + 6);
+                helper_failed = 1;
+                break;
+            }
+        }
+
+        close(sock);
+
+        if (helper_failed || prompt_pid > 0) {
+            // Helper failed or socket closed unexpectedly after prompt was spawned
+            if (prompt_pid > 0) {
+                write(prompt_sock[0], "E\n", 2); // Tell UI to retry
+                continue; // Re-connect to helper with same cookie
+            }
+        }
+        
+        break; // Fatal error before prompt started
     }
 
-    log_warn("helper socket closed unexpectedly");
-    close(sock);
+fail:
+    if (prompt_pid > 0) {
+        kill(prompt_pid, SIGTERM);
+        waitpid(prompt_pid, NULL, 0);
+    }
     _exit(1);
 }
 

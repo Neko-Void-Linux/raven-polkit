@@ -10,6 +10,7 @@ log_level_t g_log_level = LL_WARN;
 const char *g_log_prefix = "polkit-prompt";
 
 static GtkWidget *entry = NULL;
+static GtkWidget *g_label_msg = NULL;
 
 static void response_cb(GtkDialog *dialog, gint response, gpointer data) {
     (void)data;
@@ -17,9 +18,37 @@ static void response_cb(GtkDialog *dialog, gint response, gpointer data) {
         const char *password = gtk_entry_get_text(GTK_ENTRY(entry));
         printf("%s\n", password);
         fflush(stdout);
-        exit(0);
+        
+        gtk_widget_set_sensitive(entry, FALSE);
+        GtkWidget *ok_btn = gtk_dialog_get_widget_for_response(dialog, GTK_RESPONSE_OK);
+        gtk_widget_set_sensitive(ok_btn, FALSE);
+    } else {
+        exit(1);
     }
-    exit(1);
+}
+
+static gboolean on_stdin_readable(GIOChannel *source, GIOCondition condition, gpointer data) {
+    if (condition & G_IO_HUP) {
+        exit(1);
+    }
+    
+    char *line = NULL;
+    gsize len;
+    if (g_io_channel_read_line(source, &line, &len, NULL, NULL) == G_IO_STATUS_NORMAL) {
+        if (line[0] == 'E') { // Error
+            gtk_widget_set_sensitive(entry, TRUE);
+            GtkWidget *ok_btn = gtk_dialog_get_widget_for_response(GTK_DIALOG(data), GTK_RESPONSE_OK);
+            gtk_widget_set_sensitive(ok_btn, TRUE);
+            gtk_entry_set_text(GTK_ENTRY(entry), "");
+            gtk_widget_grab_focus(entry);
+            
+            gtk_label_set_markup(GTK_LABEL(g_label_msg), "<span foreground='red'><b>Authentication failed. Please try again.</b></span>");
+        } else if (line[0] == 'S') { // Success
+            exit(0);
+        }
+        g_free(line);
+    }
+    return TRUE;
 }
 
 static void print_usage(const char *argv0) {
@@ -79,12 +108,12 @@ int main(int argc, char *argv[]) {
     gtk_grid_attach(GTK_GRID(grid), icon, 0, 0, 1, 2);
 
     char *markup = g_markup_printf_escaped("<b>%s</b>", message);
-    GtkWidget *label = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(label), markup);
+    g_label_msg = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(g_label_msg), markup);
     g_free(markup);
-    gtk_label_set_line_wrap(GTK_LABEL(label), TRUE);
-    gtk_label_set_max_width_chars(GTK_LABEL(label), 50);
-    gtk_grid_attach(GTK_GRID(grid), label, 1, 0, 1, 1);
+    gtk_label_set_line_wrap(GTK_LABEL(g_label_msg), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(g_label_msg), 50);
+    gtk_grid_attach(GTK_GRID(grid), g_label_msg, 1, 0, 1, 1);
 
     if (user) {
         char *user_markup = g_markup_printf_escaped(
@@ -108,6 +137,9 @@ int main(int argc, char *argv[]) {
     gtk_widget_show_all(dialog);
 
     g_signal_connect(dialog, "response", G_CALLBACK(response_cb), NULL);
+    
+    GIOChannel *channel = g_io_channel_unix_new(STDIN_FILENO);
+    g_io_add_watch(channel, G_IO_IN | G_IO_HUP, on_stdin_readable, dialog);
 
     gtk_main();
     return 1;
