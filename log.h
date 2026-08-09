@@ -1,8 +1,8 @@
 #ifndef POLKIT_AGENT_LITE_LOG_H
 #define POLKIT_AGENT_LITE_LOG_H
 
-/*
- * Minimal syslog-style logger for raven-polkit-agent-lite.
+/**
+ * Minimal syslog-style logger for raven-polkit.
  *
  * Output format (single line, tail-friendly):
  *   raven-polkit-agent[1234]: ERROR cannot connect to system bus
