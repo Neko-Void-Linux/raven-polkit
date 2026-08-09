@@ -1,6 +1,10 @@
-CC      := gcc
-CFLAGS  := -Os -s -fdata-sections -ffunction-sections -Wl,--gc-sections \
-           -Wall -Wextra -Wno-unused-parameter
+CC ?= gcc
+PREFIX ?= /usr
+LIBDIR ?= $(PREFIX)/lib/polkit-agent-lite
+PROMPT_PATH ?= $(LIBDIR)/polkit-prompt
+
+CFLAGS ?= -Os -s -fdata-sections -ffunction-sections -Wl,--gc-sections -Wall -Wextra -Wno-unused-parameter
+CFLAGS += -DPROMPT_DEFAULT_PATH="\"$(PROMPT_PATH)\""
 LDFLAGS := -Os -s -Wl,--gc-sections -Wl,--as-needed
 
 all: polkit-agent polkit-prompt size

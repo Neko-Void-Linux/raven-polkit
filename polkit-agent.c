@@ -406,23 +406,16 @@ int main(int argc, char **argv) {
     DBusError err;
     dbus_error_init(&err);
 
+#ifndef PROMPT_DEFAULT_PATH
+#define PROMPT_DEFAULT_PATH "/usr/lib/polkit-agent-lite/polkit-prompt"
+#endif
+
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--prompt") == 0 && i + 1 < argc)
-            prompt_path = argv[++i];
-        else if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-d") == 0)
+        if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-d") == 0)
             opt_debug = 1;
     }
-    if (!prompt_path) {
-        char *s = strrchr(argv[0], '/');
-        if (s) {
-            char p[4096];
-            snprintf(p, sizeof(p), "%.*s/polkit-prompt", (int)(s - argv[0]), argv[0]);
-            if (access(p, X_OK) == 0) { prompt_path = strdup(p); goto done; }
-        }
-        if (access("./polkit-prompt", X_OK) == 0) prompt_path = "./polkit-prompt";
-        else prompt_path = "polkit-prompt";
-    }
-done:
+    
+    prompt_path = PROMPT_DEFAULT_PATH;
 
     g_session_id = get_session_id();
     if (!g_session_id) {
