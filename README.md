@@ -31,9 +31,9 @@ Para dejarlo fijo, agrega esto a tu configuración de `i3` o `sway` (`~/.config/
 exec --no-startup-id exec /usr/lib/raven-polkit/raven-polkit-agent
 ```
 
-Si quieres probarlo en vivo sin reiniciar tu entorno, puedes inyectarlo al gestor de ventanas así:
+Si quieres probarlo en vivo sin reiniciar tu entorno, puedes inyectarlo al gestor de ventanas así (usamos un doble `exec` para matar el shell intermedio y ahorrar RAM):
 ```bash
-i3-msg exec '/usr/lib/raven-polkit/raven-polkit-agent --debug 2>>/tmp/pa.log'
+i3-msg exec 'exec /usr/lib/raven-polkit/raven-polkit-agent --debug 2>>/tmp/pa.log'
 ```
 
 ### Depuración en Vivo (Ver los logs)
@@ -47,7 +47,7 @@ Sigue estos 3 pasos para inyectarlo en tu entorno y leer los logs en vivo:
    ```
 2. Dile a i3 que inicie una instancia nueva con el modo `--debug` encendido, tirando el texto a un archivo:
    ```bash
-   i3-msg exec '/usr/lib/raven-polkit/raven-polkit-agent --debug 2>>/tmp/pa.log'
+   i3-msg exec 'exec /usr/lib/raven-polkit/raven-polkit-agent --debug 2>>/tmp/pa.log'
    ```
 3. Lee el archivo de texto en vivo desde tu terminal:
    ```bash
