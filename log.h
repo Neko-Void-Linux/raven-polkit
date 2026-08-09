@@ -1,5 +1,5 @@
-#ifndef POLKIT_AGENT_LITE_LOG_H
-#define POLKIT_AGENT_LITE_LOG_H
+#ifndef RAVEN_POLKIT_LOG_H
+#define RAVEN_POLKIT_LOG_H
 
 /**
  * Minimal syslog-style logger for raven-polkit.
