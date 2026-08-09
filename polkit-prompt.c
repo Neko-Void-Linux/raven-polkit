@@ -2,6 +2,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <gtk/gtk.h>
+#include "log.h"
+
+/* Logger state for the prompt binary. Default WARN. */
+log_level_t g_log_level = LL_WARN;
+const char *g_log_prefix = "polkit-prompt";
 
 static GtkWidget *entry = NULL;
 
@@ -16,16 +21,35 @@ static void response_cb(GtkDialog *dialog, gint response, gpointer data) {
     exit(1);
 }
 
+static void print_usage(const char *argv0) {
+    fprintf(stderr,
+        "Usage: %s [--message MSG] [--user NAME] [--help|-h]\n"
+        "\n"
+        "  --message MSG   prompt message shown to the user\n"
+        "  --user  NAME    user being authenticated (display only)\n"
+        "  --help, -h      this message\n",
+        argv0);
+}
+
 int main(int argc, char *argv[]) {
     const char *message = "Authentication required";
     const char *user = NULL;
+
+    /* Line-buffered stderr for tail-friendly logs. */
+    setvbuf(stderr, NULL, _IOLBF, 0);
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--message") == 0 && i + 1 < argc)
             message = argv[++i];
         else if (strcmp(argv[i], "--user") == 0 && i + 1 < argc)
             user = argv[++i];
+        else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        }
     }
+
+    log_debug("prompt starting (user=%s)", user ? user : "<none>");
 
     gtk_init(&argc, &argv);
 

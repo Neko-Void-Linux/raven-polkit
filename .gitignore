@@ -5,3 +5,9 @@ polkit-prompt
 # Objetos/depencias
 *.o
 *.so
+
+# Tooling de editor/analisis (generable, no source)
+compile_flags.txt
+
+# graphify: knowledge graph de analisis del codigo
+graphify-out/

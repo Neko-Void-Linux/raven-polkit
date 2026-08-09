@@ -27,11 +27,11 @@ static DBusConnection *g_bus = NULL;
 static volatile sig_atomic_t g_running = 1;
 static pid_t g_auth_child = 0;
 static DBusMessage *g_pending_msg = NULL;
+static int opt_debug = 0;
 
-static void die(const char *msg) {
-    fprintf(stderr, "polkit-agent: %s\n", msg);
-    exit(1);
-}
+#define log_error(fmt, ...) fprintf(stderr, "polkit-agent[%d]: ERROR " fmt "\n", getpid(), ##__VA_ARGS__)
+#define log_warn(fmt, ...)  fprintf(stderr, "polkit-agent[%d]: WARN  " fmt "\n", getpid(), ##__VA_ARGS__)
+#define log_debug(fmt, ...) do { if (opt_debug) fprintf(stderr, "polkit-agent[%d]: DEBUG " fmt "\n", getpid(), ##__VA_ARGS__); } while(0)
 
 static void sigterm_handler(int sig) {
     (void)sig;
@@ -43,7 +43,7 @@ static DBusConnection *connect_system_bus(void) {
     dbus_error_init(&err);
     DBusConnection *conn = dbus_bus_get(DBUS_BUS_SYSTEM, &err);
     if (!conn) {
-        fprintf(stderr, "polkit-agent: cannot connect to system bus: %s\n", err.message);
+        log_error("cannot connect to system bus: %s", err.message);
         dbus_error_free(&err);
         return NULL;
     }
@@ -56,7 +56,7 @@ static int system_call(DBusMessage *call) {
     dbus_error_init(&err);
     DBusMessage *reply = dbus_connection_send_with_reply_and_block(g_bus, call, -1, &err);
     if (!reply) {
-        fprintf(stderr, "polkit-agent: D-Bus call failed: %s\n", err.message);
+        log_warn("D-Bus call failed: %s", err.message);
         dbus_error_free(&err);
         return -1;
     }
@@ -64,19 +64,29 @@ static int system_call(DBusMessage *call) {
     return 0;
 }
 
+/* Determine the login session this process belongs to, the same way polkitd
+ * does (sd_pid_get_session: cgroup membership in session-N.scope). Must match
+ * polkitd exactly or RegisterAuthenticationAgent is rejected with
+ * "Passed session and the session the caller is in differs". A process not in
+ * any session scope (e.g. launched from the user systemd manager) yields NULL
+ * here - and polkitd agrees it has no session, so registration is impossible. */
 static char *get_session_id(void) {
-    char *sid = getenv("XDG_SESSION_ID");
-    if (sid && *sid) return strdup(sid);
-    FILE *f = popen("loginctl list-sessions --no-legend 2>/dev/null | "
-                    "grep $(whoami) | head -1 | awk '{print $1}'", "r");
-    if (!f) return NULL;
-    char buf[64];
-    if (fgets(buf, sizeof(buf), f)) {
-        size_t len = strlen(buf);
-        if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
-        if (strlen(buf) > 0) { pclose(f); return strdup(buf); }
+    FILE *cg = fopen("/proc/self/cgroup", "r");
+    if (!cg) return NULL;
+    char line[512];
+    while (fgets(line, sizeof(line), cg)) {
+        char *p = strstr(line, "session-");
+        if (p) {
+            char *s = strchr(p, '.');
+            if (s && strncmp(s, ".scope", 6) == 0) {
+                *s = '\0';
+                p += 8;
+                fclose(cg);
+                return strdup(p);
+            }
+        }
     }
-    pclose(f);
+    fclose(cg);
     return NULL;
 }
 
@@ -155,29 +165,25 @@ connect_helper_socket(void) {
 }
 
 static void
-run_auth_session(const char *cookie, const char *username, uid_t uid,
+run_auth_session(const char *cookie, const char *username, uid_t uid, const char *action_id,
                   const char *prompt_path) {
     int sock = connect_helper_socket();
     if (sock < 0) {
-        fprintf(stderr, "polkit-agent: cannot connect to helper socket\n");
+        log_error("cannot connect to helper socket");
         _exit(1);
     }
-    fprintf(stderr, "polkit-agent-child: connected to helper socket\n");
 
     int flags = fcntl(sock, F_GETFL, 0);
     fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
 
-    fprintf(stderr, "polkit-agent-child: sending username '%s' + cookie\n", username);
     write(sock, username, strlen(username));
     write(sock, "\n", 1);
     write(sock, cookie, strlen(cookie));
     write(sock, "\n", 1);
 
-    int max_retries = 3;
     char line[4096];
 
     while (read_line(sock, line, sizeof(line)) > 0) {
-        fprintf(stderr, "polkit-agent-child: received: %s\n", line);
         if (strncmp(line, "PAM_PROMPT_ECHO_OFF ", 20) == 0) {
             const char *msg = line + 20;
             int prompt_pipe[2];
@@ -191,13 +197,9 @@ run_auth_session(const char *cookie, const char *username, uid_t uid,
                 dup2(prompt_pipe[1], STDOUT_FILENO);
                 close(prompt_pipe[1]);
 
-                char uid_str[32];
-                snprintf(uid_str, sizeof(uid_str), "%u", (unsigned)uid);
-
                 execlp(prompt_path, prompt_path,
                        "--message", msg,
                        "--user", username,
-                       "--uid", uid_str,
                        (char *)NULL);
                 _exit(127);
             }
@@ -208,25 +210,24 @@ run_auth_session(const char *cookie, const char *username, uid_t uid,
             close(prompt_pipe[0]);
 
             if (n > 0 && pwbuf[n - 1] == '\n') pwbuf[n - 1] = '\0';
-            fprintf(stderr, "polkit-agent-child: sending password (len=%d)\n", n > 0 ? (int)strlen(pwbuf) : 0);
+            
             write(sock, pwbuf, n > 0 ? strlen(pwbuf) : 0);
             write(sock, "\n", 1);
 
             int st;
             waitpid(prompt_pid, &st, 0);
         } else if (strcmp(line, "SUCCESS") == 0) {
-            fprintf(stderr, "polkit-agent-child: SUCCESS\n");
+            log_debug("auth OK for user %s (action %s)", username, action_id);
             close(sock);
             _exit(0);
-        } else if (strcmp(line, "FAILURE") == 0) {
-            if (--max_retries > 0) continue;
-            fprintf(stderr, "polkit-agent-child: FAILURE\n");
+        } else if (strncmp(line, "ERROR ", 6) == 0) {
+            log_debug("auth err for user %s (action %s): %s", username, action_id, line + 6);
             close(sock);
             _exit(1);
         }
     }
 
-    fprintf(stderr, "polkit-agent-child: done\n");
+    log_warn("helper socket closed unexpectedly");
     close(sock);
     _exit(1);
 }
@@ -247,13 +248,11 @@ agent_msg_handler(DBusConnection *conn, DBusMessage *msg, void *user_data) {
         if (!dbus_message_iter_init(msg, &args))
             return DBUS_HANDLER_RESULT_HANDLED;
 
-        char *action_id = NULL, *message = NULL, *cookie = NULL;
+        char *action_id = NULL, *cookie = NULL;
         int argn = 0;
         while (dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_INVALID) {
             if (argn == 0 && dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_STRING)
                 dbus_message_iter_get_basic(&args, &action_id);
-            else if (argn == 1 && dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_STRING)
-                dbus_message_iter_get_basic(&args, &message);
             else if (argn == 4 && dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_STRING)
                 dbus_message_iter_get_basic(&args, &cookie);
             argn++;
@@ -261,7 +260,7 @@ agent_msg_handler(DBusConnection *conn, DBusMessage *msg, void *user_data) {
         }
 
         if (!cookie) {
-            send_error(conn, msg, DBUS_ERROR_INVALID_ARGS, "Missing cookie");
+            send_error(g_bus, msg, DBUS_ERROR_INVALID_ARGS, "Missing cookie");
             return DBUS_HANDLER_RESULT_HANDLED;
         }
 
@@ -316,19 +315,23 @@ agent_msg_handler(DBusConnection *conn, DBusMessage *msg, void *user_data) {
         }
 
         if (uid == (uid_t)-1) {
-            send_error(conn, msg,
-                "org.freedesktop.PolicyKit1.Error.Failed", "No unix-user identity");
+            send_error(g_bus, msg,
+                "org.freedesktop.PolicyKit1.Error.Failed", "Cannot determine uid");
             return DBUS_HANDLER_RESULT_HANDLED;
         }
 
         struct passwd *pw = getpwuid(uid);
-        const char *username = pw ? pw->pw_name : "unknown";
+        if (!pw) {
+            send_error(g_bus, msg,
+                "org.freedesktop.PolicyKit1.Error.Failed", "Unknown uid");
+            return DBUS_HANDLER_RESULT_HANDLED;
+        }
 
         g_pending_msg = dbus_message_ref(msg);
 
         pid_t child = fork();
         if (child == 0) {
-            run_auth_session(cookie, username, uid, prompt_path);
+            run_auth_session(cookie, pw->pw_name, uid, action_id ? action_id : "unknown", prompt_path);
             _exit(1);
         } else if (child > 0) {
             g_auth_child = child;
@@ -361,7 +364,7 @@ static void register_agent(void) {
     DBusMessage *call = dbus_message_new_method_call(
         AUTHORITY_NAME, AUTHORITY_OBJ, AUTHORITY_IFACE,
         "RegisterAuthenticationAgent");
-    if (!call) { fprintf(stderr, "polkit-agent: out of memory\n"); return; }
+    if (!call) { log_error("out of memory"); return; }
 
     const char *locale = getenv("LANG");
     if (!locale || !*locale) locale = "C";
@@ -374,7 +377,7 @@ static void register_agent(void) {
     dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &obj_path);
 
     if (system_call(call) == 0)
-        fprintf(stderr, "polkit-agent: registered (session=%s)\n", g_session_id);
+        log_debug("registered (session=%s)", g_session_id);
     dbus_message_unref(call);
 }
 
@@ -400,10 +403,14 @@ static void unregister_agent(void) {
 
 int main(int argc, char **argv) {
     const char *prompt_path = NULL;
+    DBusError err;
+    dbus_error_init(&err);
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--prompt") == 0 && i + 1 < argc)
             prompt_path = argv[++i];
+        else if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-d") == 0)
+            opt_debug = 1;
     }
     if (!prompt_path) {
         char *s = strrchr(argv[0], '/');
@@ -419,7 +426,7 @@ done:
 
     g_session_id = get_session_id();
     if (!g_session_id) {
-        fprintf(stderr, "polkit-agent: cannot determine session ID\n");
+        log_error("cannot determine session ID");
         return 1;
     }
 
@@ -439,23 +446,24 @@ done:
     g_bus = connect_system_bus();
     if (!g_bus) return 1;
 
-    register_agent();
-
     static const DBusObjectPathVTable vtable = {
         .unregister_function = NULL,
         .message_function = agent_msg_handler,
     };
-    if (!dbus_connection_register_object_path(g_bus, AGENT_OBJ_PATH, &vtable,
-                                               (void *)prompt_path))
-        die("Cannot register object path");
+    if (!dbus_connection_try_register_object_path(g_bus, AGENT_OBJ_PATH, &vtable, (void*)prompt_path, &err)) {
+        log_error("failed to register object path: %s", err.message);
+        dbus_error_free(&err);
+        return 1;
+    }
 
-    fprintf(stderr, "polkit-agent: ready (pid=%d, prompt=%s)\n", getpid(), prompt_path);
-
+    register_agent();
+    
     while (g_running) {
         if (!dbus_connection_read_write_dispatch(g_bus, 100)) {
-            fprintf(stderr, "polkit-agent: system bus disconnected\n");
+            log_error("system bus disconnected");
             break;
         }
+
         if (g_auth_child > 0) {
             int st;
             if (waitpid(g_auth_child, &st, WNOHANG) > 0) {
@@ -473,7 +481,7 @@ done:
         }
     }
 
-    fprintf(stderr, "polkit-agent: exiting\n");
+    log_debug("exiting");
     if (g_auth_child > 0) { kill(g_auth_child, SIGTERM); waitpid(g_auth_child, NULL, 0); }
     unregister_agent();
     free(g_session_id);
