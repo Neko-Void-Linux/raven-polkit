@@ -28,7 +28,7 @@ La forma correcta de ejecutar el agente es dejar que herede el cgroup de sesión
 
 Para dejarlo fijo, agrega esto a tu configuración de `i3` o `sway` (`~/.config/i3/config`):
 ```text
-exec --no-startup-id /usr/lib/polkit-agent-lite/polkit-agent
+exec --no-startup-id exec /usr/lib/polkit-agent-lite/polkit-agent
 ```
 
 Si quieres probarlo en vivo sin reiniciar tu entorno, puedes inyectarlo al gestor de ventanas así:
