@@ -11,12 +11,40 @@ A minimalist, pure-C PolicyKit authentication agent.
 
 ## Instalación
 
-1. Asegúrate de tener las cabeceras de GTK3 y DBus.
+### Opción 1: Desde binarios precompilados (Releases)
+
+Descarga el paquete correspondiente a tu distribución desde [Releases](https://github.com/Derszi65g/raven-polkit/releases):
+
+* **Arch Linux, Debian, Ubuntu, Fedora, Void (glibc):**
+  ```bash
+  # Descargar y extraer
+  tar -xzvf raven-polkit-x86_64-linux-glibc.tar.gz
+
+  # Instalar binarios
+  sudo install -d /usr/lib/raven-polkit
+  sudo install -m 755 raven-polkit-agent /usr/lib/raven-polkit/
+  sudo install -m 755 raven-polkit-prompt /usr/lib/raven-polkit/
+  ```
+
+* **Void Linux (musl), Alpine Linux:**
+  ```bash
+  # Descargar y extraer
+  tar -xzvf raven-polkit-x86_64-linux-musl.tar.gz
+
+  # Instalar binarios
+  sudo install -d /usr/lib/raven-polkit
+  sudo install -m 755 raven-polkit-agent /usr/lib/raven-polkit/
+  sudo install -m 755 raven-polkit-prompt /usr/lib/raven-polkit/
+  ```
+
+### Opción 2: Compilar desde el código fuente
+
+1. Asegúrate de tener instaladas las cabeceras de desarrollo de GTK3 y DBus (`libgtk-3-dev`/`gtk+3-devel` y `libdbus-1-dev`/`dbus-devel`).
 2. Compila el código:
    ```bash
    make
    ```
-3. Instala los binarios generados en las rutas protegidas del sistema:
+3. Instala los binarios en el sistema:
    ```bash
    sudo make install
    ```
