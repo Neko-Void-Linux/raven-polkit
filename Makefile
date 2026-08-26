@@ -3,9 +3,9 @@ PREFIX ?= /usr
 LIBDIR ?= $(PREFIX)/lib/raven-polkit
 PROMPT_PATH ?= $(LIBDIR)/raven-polkit-prompt
 
-CFLAGS ?= -Os -s -fdata-sections -ffunction-sections -Wl,--gc-sections -Wall -Wextra -Wno-unused-parameter
+CFLAGS ?= -Os -fdata-sections -ffunction-sections -Wall -Wextra -Wno-unused-parameter
 CFLAGS += -DPROMPT_DEFAULT_PATH="\"$(PROMPT_PATH)\""
-LDFLAGS := -Os -s -Wl,--gc-sections -Wl,--as-needed
+LDFLAGS ?= -Os -s -Wl,--gc-sections -Wl,--as-needed
 
 all: raven-polkit-agent raven-polkit-prompt size
 
@@ -29,15 +29,18 @@ size: raven-polkit-agent raven-polkit-prompt
 	@echo "To run the prompt manually: ./raven-polkit-prompt --message 'Test' --user $$(whoami)"
 
 install: all
-	install -d $(DESTDIR)/usr/lib/raven-polkit
-	install -m 755 raven-polkit-agent $(DESTDIR)/usr/lib/raven-polkit/
-	install -m 755 raven-polkit-prompt $(DESTDIR)/usr/lib/raven-polkit/
+	install -d $(DESTDIR)$(LIBDIR)
+	install -m 755 raven-polkit-agent $(DESTDIR)$(LIBDIR)/
+	install -m 755 raven-polkit-prompt $(DESTDIR)$(LIBDIR)/
 
 run: all
 	@echo "Starting raven-polkit-agent (Ctrl+C to stop)..."
 	@./raven-polkit-agent
 
+release:
+	@./build-release.sh
+
 clean:
 	rm -f raven-polkit-agent raven-polkit-prompt
 
-.PHONY: all size install clean run
+.PHONY: all size install clean run release

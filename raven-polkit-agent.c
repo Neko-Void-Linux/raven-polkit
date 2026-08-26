@@ -8,20 +8,20 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <pwd.h>
+#include <grp.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <dbus/dbus.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <fcntl.h>
 
 #define AGENT_OBJ_PATH  "/org/freedesktop/PolicyKit1/AuthenticationAgent"
 #define AGENT_IFACE     "org.freedesktop.PolicyKit1.AuthenticationAgent"
 #define AUTHORITY_NAME  "org.freedesktop.PolicyKit1"
 #define AUTHORITY_OBJ   "/org/freedesktop/PolicyKit1/Authority"
 #define AUTHORITY_IFACE "org.freedesktop.PolicyKit1.Authority"
-#define HELPER_PATH     "/usr/lib/polkit-1/raven-polkit-agent-helper-1"
+#define LINE_BUF_SIZE   4096
 
 static DBusConnection *g_bus = NULL;
 static volatile sig_atomic_t g_running = 1;
@@ -138,6 +138,7 @@ read_line(int fd, char *buf, size_t bufsz) {
             return (i > 0) ? (int)i : -1;
         }
         if (c == '\n') {
+            if (i > 0 && buf[i - 1] == '\r') i--;
             buf[i] = '\0';
             return (int)i;
         }
@@ -163,11 +164,152 @@ connect_helper_socket(void) {
     return fd;
 }
 
+static int is_lockout_message(const char *msg) {
+    if (!msg || !*msg) return 0;
+    static const char *patterns[] = {
+        "lock", "bloquea", "expire", "expirad", "caducad",
+        "disable", "deshabilitad", "desactivad", "denied", "denegad",
+        "maximum", "máximo", "max tries", "tally", "faillock"
+    };
+    for (size_t i = 0; i < sizeof(patterns) / sizeof(patterns[0]); i++) {
+        if (strcasestr(msg, patterns[i])) return 1;
+    }
+    return 0;
+}
+
+static int
+extract_identities(DBusMessageIter *id_arr, char *usernames[], int max_users) {
+    int count = 0;
+    while (dbus_message_iter_get_arg_type(id_arr) == DBUS_TYPE_STRUCT && count < max_users) {
+        DBusMessageIter id_st;
+        dbus_message_iter_recurse(id_arr, &id_st);
+        char *id_type = NULL;
+        if (dbus_message_iter_get_arg_type(&id_st) == DBUS_TYPE_STRING)
+            dbus_message_iter_get_basic(&id_st, &id_type);
+
+        if (id_type && strcmp(id_type, "unix-user") == 0) {
+            dbus_message_iter_next(&id_st);
+            if (dbus_message_iter_get_arg_type(&id_st) == DBUS_TYPE_ARRAY) {
+                DBusMessageIter at;
+                dbus_message_iter_recurse(&id_st, &at);
+                while (dbus_message_iter_get_arg_type(&at) == DBUS_TYPE_DICT_ENTRY) {
+                    DBusMessageIter de;
+                    dbus_message_iter_recurse(&at, &de);
+                    char *key = NULL;
+                    if (dbus_message_iter_get_arg_type(&de) == DBUS_TYPE_STRING)
+                        dbus_message_iter_get_basic(&de, &key);
+                    if (key && strcmp(key, "uid") == 0) {
+                        dbus_message_iter_next(&de);
+                        if (dbus_message_iter_get_arg_type(&de) == DBUS_TYPE_VARIANT) {
+                            DBusMessageIter v;
+                            dbus_message_iter_recurse(&de, &v);
+                            if (dbus_message_iter_get_arg_type(&v) == DBUS_TYPE_UINT32) {
+                                dbus_uint32_t u;
+                                dbus_message_iter_get_basic(&v, &u);
+                                struct passwd *pw = getpwuid((uid_t)u);
+                                if (pw && pw->pw_name) {
+                                    int exists = 0;
+                                    for (int j = 0; j < count; j++) {
+                                        if (strcmp(usernames[j], pw->pw_name) == 0) {
+                                            exists = 1;
+                                            break;
+                                        }
+                                    }
+                                    if (!exists && count < max_users) {
+                                        usernames[count++] = strdup(pw->pw_name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    dbus_message_iter_next(&at);
+                }
+            }
+        } else if (id_type && strcmp(id_type, "unix-group") == 0) {
+            dbus_message_iter_next(&id_st);
+            if (dbus_message_iter_get_arg_type(&id_st) == DBUS_TYPE_ARRAY) {
+                DBusMessageIter at;
+                dbus_message_iter_recurse(&id_st, &at);
+                while (dbus_message_iter_get_arg_type(&at) == DBUS_TYPE_DICT_ENTRY) {
+                    DBusMessageIter de;
+                    dbus_message_iter_recurse(&at, &de);
+                    char *key = NULL;
+                    if (dbus_message_iter_get_arg_type(&de) == DBUS_TYPE_STRING)
+                        dbus_message_iter_get_basic(&de, &key);
+                    if (key && strcmp(key, "gid") == 0) {
+                        dbus_message_iter_next(&de);
+                        if (dbus_message_iter_get_arg_type(&de) == DBUS_TYPE_VARIANT) {
+                            DBusMessageIter v;
+                            dbus_message_iter_recurse(&de, &v);
+                            if (dbus_message_iter_get_arg_type(&v) == DBUS_TYPE_UINT32) {
+                                dbus_uint32_t g;
+                                dbus_message_iter_get_basic(&v, &g);
+                                struct group *gr = getgrgid((gid_t)g);
+                                if (gr && gr->gr_mem) {
+                                    for (char **m = gr->gr_mem; *m && count < max_users; m++) {
+                                        int exists = 0;
+                                        for (int j = 0; j < count; j++) {
+                                            if (strcmp(usernames[j], *m) == 0) {
+                                                exists = 1;
+                                                break;
+                                            }
+                                        }
+                                        if (!exists && count < max_users) {
+                                            usernames[count++] = strdup(*m);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    dbus_message_iter_next(&at);
+                }
+            }
+        }
+        dbus_message_iter_next(id_arr);
+    }
+    return count;
+}
+
 static void
-run_auth_session(const char *cookie, const char *username, uid_t uid, const char *action_id,
-                 const char *prompt_path) {
+run_auth_session(const char *cookie, char *usernames[], int user_count,
+                 const char *action_id, const char *action_msg, const char *prompt_path) {
     int prompt_sock[2] = {-1, -1};
     pid_t prompt_pid = -1;
+
+    if (user_count <= 0) _exit(1);
+
+    char users_csv[1024] = {0};
+    for (int i = 0; i < user_count; i++) {
+        if (i > 0) strncat(users_csv, ",", sizeof(users_csv) - strlen(users_csv) - 1);
+        strncat(users_csv, usernames[i], sizeof(users_csv) - strlen(users_csv) - 1);
+    }
+
+    char current_user[256] = {0};
+    strncpy(current_user, usernames[0], sizeof(current_user) - 1);
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, prompt_sock) < 0) goto fail;
+
+    prompt_pid = fork();
+    if (prompt_pid < 0) {
+        close(prompt_sock[0]); close(prompt_sock[1]);
+        goto fail;
+    }
+
+    if (prompt_pid == 0) {
+        close(prompt_sock[0]);
+        dup2(prompt_sock[1], STDIN_FILENO);
+        dup2(prompt_sock[1], STDOUT_FILENO);
+        close(prompt_sock[1]);
+
+        execlp(prompt_path, prompt_path,
+                "--message", (action_msg && *action_msg) ? action_msg : "Authentication required",
+                "--users", users_csv,
+                "--user", current_user,
+                (char *)NULL);
+        _exit(127);
+    }
+    close(prompt_sock[1]);
 
     while (1) {
         int sock = connect_helper_socket();
@@ -179,72 +321,124 @@ run_auth_session(const char *cookie, const char *username, uid_t uid, const char
         int flags = fcntl(sock, F_GETFL, 0);
         fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
 
-        write(sock, username, strlen(username));
+        write(sock, current_user, strlen(current_user));
         write(sock, "\n", 1);
         write(sock, cookie, strlen(cookie));
         write(sock, "\n", 1);
 
-        char line[4096];
-        int helper_failed = 0;
+        char line[LINE_BUF_SIZE];
+        int helper_succeeded = 0;
+        int had_prompt_echo = 0;
+        char pam_error_msg[LINE_BUF_SIZE] = {0};
+        int user_switched = 0;
 
         while (read_line(sock, line, sizeof(line)) > 0) {
-            if (strncmp(line, "PAM_PROMPT_ECHO_OFF ", 20) == 0) {
-                if (prompt_pid < 0) {
-                    if (socketpair(AF_UNIX, SOCK_STREAM, 0, prompt_sock) < 0) break;
+            if (strncmp(line, "PAM_PROMPT_ECHO_OFF ", 20) == 0 ||
+                strncmp(line, "PAM_PROMPT_ECHO_ON ", 19) == 0) {
+                had_prompt_echo = 1;
+                int is_echo_off = (strncmp(line, "PAM_PROMPT_ECHO_OFF ", 20) == 0);
+                const char *prompt_text = is_echo_off ? (line + 20) : (line + 19);
 
-                    prompt_pid = fork();
-                    if (prompt_pid < 0) { close(prompt_sock[0]); close(prompt_sock[1]); break; }
+                char req_buf[LINE_BUF_SIZE + 64];
+                snprintf(req_buf, sizeof(req_buf), "REQ %d %s\n", is_echo_off ? 0 : 1, prompt_text);
+                write(prompt_sock[0], req_buf, strlen(req_buf));
 
-                    if (prompt_pid == 0) {
-                        close(prompt_sock[0]);
-                        dup2(prompt_sock[1], STDIN_FILENO);
-                        dup2(prompt_sock[1], STDOUT_FILENO);
-                        close(prompt_sock[1]);
-
-                        execlp(prompt_path, prompt_path,
-                               "--message", line + 20,
-                               "--user", username,
-                               (char *)NULL);
-                        _exit(127);
-                    }
-                    close(prompt_sock[1]);
-                }
-
-                char pwbuf[4096] = {0};
-                int n = read(prompt_sock[0], pwbuf, sizeof(pwbuf) - 1);
-                
+                char prompt_in[LINE_BUF_SIZE] = {0};
+                int n = read_line(prompt_sock[0], prompt_in, sizeof(prompt_in));
                 if (n <= 0) {
                     close(sock);
                     goto fail;
                 }
-                
-                if (pwbuf[n - 1] == '\n') pwbuf[n - 1] = '\0';
-                
-                write(sock, pwbuf, strlen(pwbuf));
-                write(sock, "\n", 1);
+
+                if (prompt_in[0] == 'U' && prompt_in[1] == ' ') {
+                    strncpy(current_user, prompt_in + 2, sizeof(current_user) - 1);
+                    user_switched = 1;
+                    break;
+                } else if (prompt_in[0] == 'P' && prompt_in[1] == ' ') {
+                    write(sock, prompt_in + 2, strlen(prompt_in + 2));
+                    write(sock, "\n", 1);
+                } else {
+                    write(sock, prompt_in, strlen(prompt_in));
+                    write(sock, "\n", 1);
+                }
+            } else if (strncmp(line, "PAM_ERROR_MSG ", 14) == 0) {
+                log_debug("PAM error: %s", line + 14);
+                strncpy(pam_error_msg, line + 14, sizeof(pam_error_msg) - 1);
+                char m_buf[LINE_BUF_SIZE + 64];
+                snprintf(m_buf, sizeof(m_buf), "M %s\n", line + 14);
+                write(prompt_sock[0], m_buf, strlen(m_buf));
+            } else if (strncmp(line, "PAM_TEXT_INFO ", 14) == 0) {
+                log_debug("PAM info: %s", line + 14);
+                char m_buf[LINE_BUF_SIZE + 64];
+                snprintf(m_buf, sizeof(m_buf), "M %s\n", line + 14);
+                write(prompt_sock[0], m_buf, strlen(m_buf));
             } else if (strcmp(line, "SUCCESS") == 0) {
-                log_debug("auth OK for user %s (action %s)", username, action_id);
+                log_debug("auth OK for user %s (action %s)", current_user, action_id);
+                helper_succeeded = 1;
                 if (prompt_pid > 0) write(prompt_sock[0], "S\n", 2);
                 close(sock);
                 _exit(0);
-            } else if (strncmp(line, "ERROR ", 6) == 0) {
-                log_debug("auth err for user %s (action %s): %s", username, action_id, line + 6);
-                helper_failed = 1;
+            } else if (strcmp(line, "FAILURE") == 0 || strncmp(line, "ERROR ", 6) == 0) {
+                log_debug("auth failed for user %s (action %s)", current_user, action_id);
                 break;
             }
         }
 
         close(sock);
 
-        if (helper_failed || prompt_pid > 0) {
-            // Helper failed or socket closed unexpectedly after prompt was spawned
-            if (prompt_pid > 0) {
-                write(prompt_sock[0], "E\n", 2); // Tell UI to retry
-                continue; // Re-connect to helper with same cookie
-            }
+        if (helper_succeeded) {
+            _exit(0);
         }
-        
-        break; // Fatal error before prompt started
+
+        if (user_switched) {
+            continue;
+        }
+
+        int is_lockout = 0;
+        if (!had_prompt_echo) {
+            /* Account is pre-locked or expired; PAM rejected immediately without password prompt */
+            is_lockout = 1;
+        } else if (is_lockout_message(pam_error_msg)) {
+            /* PAM returned explicit lockout message (e.g. from pam_faillock / pam_tally2) */
+            is_lockout = 1;
+        }
+
+        if (prompt_pid > 0) {
+            if (is_lockout) {
+                write(prompt_sock[0], "DIS\n", 4);
+                char err_buf[LINE_BUF_SIZE + 64];
+                if (pam_error_msg[0] != '\0') {
+                    snprintf(err_buf, sizeof(err_buf), "E %s\n", pam_error_msg);
+                } else {
+                    snprintf(err_buf, sizeof(err_buf), "E The account is locked that's why you may not login.\n");
+                }
+                write(prompt_sock[0], err_buf, strlen(err_buf));
+
+                char switch_buf[LINE_BUF_SIZE];
+                while (read_line(prompt_sock[0], switch_buf, sizeof(switch_buf)) > 0) {
+                    if (switch_buf[0] == 'U' && switch_buf[1] == ' ') {
+                        strncpy(current_user, switch_buf + 2, sizeof(current_user) - 1);
+                        user_switched = 1;
+                        break;
+                    }
+                }
+                if (user_switched) {
+                    continue;
+                }
+                break;
+            } else {
+                /* Failed attempt, allow retry (matching xfce-polkit on_session_completed) */
+                if (pam_error_msg[0] != '\0' && strcmp(pam_error_msg, "Authentication failure") != 0) {
+                    char err_buf[LINE_BUF_SIZE + 64];
+                    snprintf(err_buf, sizeof(err_buf), "E %s\n", pam_error_msg);
+                    write(prompt_sock[0], err_buf, strlen(err_buf));
+                } else {
+                    write(prompt_sock[0], "E Failed. Wrong password?\n", 26);
+                }
+            }
+        } else {
+            break;
+        }
     }
 
 fail:
@@ -271,13 +465,22 @@ agent_msg_handler(DBusConnection *conn, DBusMessage *msg, void *user_data) {
         if (!dbus_message_iter_init(msg, &args))
             return DBUS_HANDLER_RESULT_HANDLED;
 
-        char *action_id = NULL, *cookie = NULL;
+        char *action_id = NULL, *action_msg = NULL, *cookie = NULL;
         int argn = 0;
+        DBusMessageIter id_iter;
+        int has_identities = 0;
+
         while (dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_INVALID) {
             if (argn == 0 && dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_STRING)
                 dbus_message_iter_get_basic(&args, &action_id);
+            else if (argn == 1 && dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_STRING)
+                dbus_message_iter_get_basic(&args, &action_msg);
             else if (argn == 4 && dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_STRING)
                 dbus_message_iter_get_basic(&args, &cookie);
+            else if (argn == 5 && dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_ARRAY) {
+                dbus_message_iter_recurse(&args, &id_iter);
+                has_identities = 1;
+            }
             argn++;
             dbus_message_iter_next(&args);
         }
@@ -287,77 +490,34 @@ agent_msg_handler(DBusConnection *conn, DBusMessage *msg, void *user_data) {
             return DBUS_HANDLER_RESULT_HANDLED;
         }
 
-        uid_t uid = (uid_t)-1;
-        {
-            DBusMessageIter a2;
-            dbus_message_iter_init(msg, &a2);
-            int i = 0;
-            while (i < 5 && dbus_message_iter_get_arg_type(&a2) != DBUS_TYPE_INVALID) {
-                dbus_message_iter_next(&a2); i++;
-            }
-            if (dbus_message_iter_get_arg_type(&a2) == DBUS_TYPE_ARRAY) {
-                DBusMessageIter id_arr;
-                dbus_message_iter_recurse(&a2, &id_arr);
-                while (dbus_message_iter_get_arg_type(&id_arr) == DBUS_TYPE_STRUCT) {
-                    DBusMessageIter id_st;
-                    dbus_message_iter_recurse(&id_arr, &id_st);
-                    char *id_type = NULL;
-                    if (dbus_message_iter_get_arg_type(&id_st) == DBUS_TYPE_STRING)
-                        dbus_message_iter_get_basic(&id_st, &id_type);
-                    if (id_type && strcmp(id_type, "unix-user") == 0) {
-                        dbus_message_iter_next(&id_st);
-                        if (dbus_message_iter_get_arg_type(&id_st) == DBUS_TYPE_ARRAY) {
-                            DBusMessageIter at;
-                            dbus_message_iter_recurse(&id_st, &at);
-                            while (dbus_message_iter_get_arg_type(&at) == DBUS_TYPE_DICT_ENTRY) {
-                                DBusMessageIter de;
-                                dbus_message_iter_recurse(&at, &de);
-                                char *key = NULL;
-                                if (dbus_message_iter_get_arg_type(&de) == DBUS_TYPE_STRING)
-                                    dbus_message_iter_get_basic(&de, &key);
-                                if (key && strcmp(key, "uid") == 0) {
-                                    dbus_message_iter_next(&de);
-                                    if (dbus_message_iter_get_arg_type(&de) == DBUS_TYPE_VARIANT) {
-                                        DBusMessageIter v;
-                                        dbus_message_iter_recurse(&de, &v);
-                                        if (dbus_message_iter_get_arg_type(&v) == DBUS_TYPE_UINT32) {
-                                            dbus_uint32_t u;
-                                            dbus_message_iter_get_basic(&v, &u);
-                                            uid = (uid_t)u;
-                                        }
-                                    }
-                                }
-                                dbus_message_iter_next(&at);
-                            }
-                        }
-                    }
-                    dbus_message_iter_next(&id_arr);
-                    if (uid != (uid_t)-1) break;
-                }
-            }
+        char *usernames[16] = {0};
+        int user_count = 0;
+        if (has_identities) {
+            user_count = extract_identities(&id_iter, usernames, 16);
         }
 
-        if (uid == (uid_t)-1) {
-            send_error(g_bus, msg,
-                "org.freedesktop.PolicyKit1.Error.Failed", "Cannot determine uid");
-            return DBUS_HANDLER_RESULT_HANDLED;
-        }
-
-        struct passwd *pw = getpwuid(uid);
-        if (!pw) {
-            send_error(g_bus, msg,
-                "org.freedesktop.PolicyKit1.Error.Failed", "Unknown uid");
-            return DBUS_HANDLER_RESULT_HANDLED;
+        if (user_count == 0) {
+            struct passwd *pw = getpwuid(getuid());
+            if (pw && pw->pw_name) {
+                usernames[user_count++] = strdup(pw->pw_name);
+            }
+            if (getuid() != 0) {
+                usernames[user_count++] = strdup("root");
+            }
         }
 
         g_pending_msg = dbus_message_ref(msg);
 
         pid_t child = fork();
         if (child == 0) {
-            run_auth_session(cookie, pw->pw_name, uid, action_id ? action_id : "unknown", prompt_path);
+            run_auth_session(cookie, usernames, user_count, action_id ? action_id : "unknown", action_msg, prompt_path);
             _exit(1);
         } else if (child > 0) {
             g_auth_child = child;
+        }
+
+        for (int j = 0; j < user_count; j++) {
+            free(usernames[j]);
         }
 
         return DBUS_HANDLER_RESULT_HANDLED;
