@@ -63,29 +63,69 @@ static int system_call(DBusMessage *call) {
     return 0;
 }
 
-/* Determine the login session this process belongs to, the same way polkitd
- * does (sd_pid_get_session: cgroup membership in session-N.scope). Must match
- * polkitd exactly or RegisterAuthenticationAgent is rejected with
- * "Passed session and the session the caller is in differs". A process not in
- * any session scope (e.g. launched from the user systemd manager) yields NULL
- * here - and polkitd agrees it has no session, so registration is impossible. */
+/* Determine the login session this process belongs to.
+ * Supports both systemd-logind (session-N.scope) and elogind (0::/N or name=elogind:/N),
+ * with XDG_SESSION_ID as fallback for non-cgroup environments. */
 static char *get_session_id(void) {
     FILE *cg = fopen("/proc/self/cgroup", "r");
-    if (!cg) return NULL;
-    char line[512];
-    while (fgets(line, sizeof(line), cg)) {
-        char *p = strstr(line, "session-");
-        if (p) {
-            char *s = strchr(p, '.');
-            if (s && strncmp(s, ".scope", 6) == 0) {
-                *s = '\0';
-                p += 8;
-                fclose(cg);
-                return strdup(p);
+    if (cg) {
+        char line[512];
+        char *elogind_id = NULL;
+
+        while (fgets(line, sizeof(line), cg)) {
+            size_t len = strlen(line);
+            while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r' || line[len - 1] == ' ')) {
+                line[--len] = '\0';
+            }
+
+            /* 1. systemd-logind: session-N.scope */
+            char *p = strstr(line, "session-");
+            if (p) {
+                char *s = strchr(p, '.');
+                if (s && strncmp(s, ".scope", 6) == 0) {
+                    *s = '\0';
+                    p += 8;
+                    fclose(cg);
+                    free(elogind_id);
+                    return strdup(p);
+                }
+            }
+
+            /* 2. elogind cgroup v1: e.g. 1:name=elogind:/1 */
+            p = strstr(line, "name=elogind:");
+            if (p) {
+                char *slash = strrchr(p, '/');
+                if (slash && *(slash + 1) != '\0') {
+                    free(elogind_id);
+                    elogind_id = strdup(slash + 1);
+                }
+            }
+
+            /* 3. elogind cgroup v2: e.g. 0::/1 */
+            if (strncmp(line, "0::/", 4) == 0 &&
+                !strstr(line, ".slice") &&
+                !strstr(line, ".service") &&
+                !strstr(line, ".scope")) {
+                char *slash = strrchr(line + 3, '/');
+                if (slash && *(slash + 1) != '\0') {
+                    free(elogind_id);
+                    elogind_id = strdup(slash + 1);
+                }
             }
         }
+        fclose(cg);
+
+        if (elogind_id) {
+            return elogind_id;
+        }
     }
-    fclose(cg);
+
+    /* Fallback for environments where cgroups are not delegated */
+    const char *env_session = getenv("XDG_SESSION_ID");
+    if (env_session && *env_session) {
+        return strdup(env_session);
+    }
+
     return NULL;
 }
 
