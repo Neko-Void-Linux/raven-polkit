@@ -189,19 +189,38 @@ read_line(int fd, char *buf, size_t bufsz) {
 }
 
 static int
-connect_helper_socket(void) {
-    struct sockaddr_un addr;
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, "/run/polkit/agent-helper.socket",
-            sizeof(addr.sun_path) - 1);
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+spawn_helper_socket(const char *user, pid_t *helper_pid) {
+    static const char *paths[] = {
+        "/usr/lib/polkit-1/polkit-agent-helper-1",
+        "/usr/libexec/polkit-agent-helper-1",
+        "/usr/lib/policykit-1/polkit-agent-helper-1",
+        NULL
+    };
+    const char *path = NULL;
+    for (int i = 0; paths[i]; i++) {
+        if (access(paths[i], X_OK) == 0) { path = paths[i]; break; }
+    }
+    if (!path) {
+        log_error("polkit-agent-helper-1 binary not found");
         return -1;
     }
-    return fd;
+
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) return -1;
+
+    *helper_pid = fork();
+    if (*helper_pid < 0) { close(sv[0]); close(sv[1]); return -1; }
+
+    if (*helper_pid == 0) {
+        dup2(sv[1], STDIN_FILENO);
+        dup2(sv[1], STDOUT_FILENO);
+        close(sv[0]); close(sv[1]);
+        execl(path, "polkit-agent-helper-1", user, (char *)NULL);
+        _exit(127);
+    }
+
+    close(sv[1]);
+    return sv[0];
 }
 
 static int is_lockout_message(const char *msg) {
@@ -352,17 +371,16 @@ run_auth_session(const char *cookie, char *usernames[], int user_count,
     close(prompt_sock[1]);
 
     while (1) {
-        int sock = connect_helper_socket();
+        pid_t helper_pid = -1;
+        int sock = spawn_helper_socket(current_user, &helper_pid);
         if (sock < 0) {
-            log_error("cannot connect to helper socket");
+            log_error("cannot spawn helper process");
             goto fail;
         }
 
         int flags = fcntl(sock, F_GETFL, 0);
         fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
 
-        write(sock, current_user, strlen(current_user));
-        write(sock, "\n", 1);
         write(sock, cookie, strlen(cookie));
         write(sock, "\n", 1);
 
@@ -417,6 +435,7 @@ run_auth_session(const char *cookie, char *usernames[], int user_count,
                 helper_succeeded = 1;
                 if (prompt_pid > 0) write(prompt_sock[0], "S\n", 2);
                 close(sock);
+                if (helper_pid > 0) waitpid(helper_pid, NULL, 0);
                 _exit(0);
             } else if (strcmp(line, "FAILURE") == 0 || strncmp(line, "ERROR ", 6) == 0) {
                 log_debug("auth failed for user %s (action %s)", current_user, action_id);
@@ -425,6 +444,7 @@ run_auth_session(const char *cookie, char *usernames[], int user_count,
         }
 
         close(sock);
+        if (helper_pid > 0) waitpid(helper_pid, NULL, 0);
 
         if (helper_succeeded) {
             _exit(0);
