@@ -189,6 +189,22 @@ read_line(int fd, char *buf, size_t bufsz) {
 }
 
 static int
+connect_helper_socket(void) {
+    struct sockaddr_un addr;
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/run/polkit/agent-helper.socket",
+            sizeof(addr.sun_path) - 1);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int
 spawn_helper_socket(const char *user, pid_t *helper_pid) {
     static const char *paths[] = {
         "/usr/lib/polkit-1/polkit-agent-helper-1",
@@ -221,6 +237,35 @@ spawn_helper_socket(const char *user, pid_t *helper_pid) {
 
     close(sv[1]);
     return sv[0];
+}
+
+static int
+open_helper_session(const char *user, const char *cookie, pid_t *helper_pid) {
+    *helper_pid = -1;
+
+    /* 1. Try socket-activated helper (systemd-based distributions) */
+    int sock = connect_helper_socket();
+    if (sock >= 0) {
+        int flags = fcntl(sock, F_GETFL, 0);
+        fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
+        write(sock, user, strlen(user));
+        write(sock, "\n", 1);
+        write(sock, cookie, strlen(cookie));
+        write(sock, "\n", 1);
+        return sock;
+    }
+
+    /* 2. Fallback: spawn setuid helper binary (Void Linux, Alpine, non-systemd) */
+    sock = spawn_helper_socket(user, helper_pid);
+    if (sock >= 0) {
+        int flags = fcntl(sock, F_GETFL, 0);
+        fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
+        write(sock, cookie, strlen(cookie));
+        write(sock, "\n", 1);
+        return sock;
+    }
+
+    return -1;
 }
 
 static int is_lockout_message(const char *msg) {
@@ -372,17 +417,11 @@ run_auth_session(const char *cookie, char *usernames[], int user_count,
 
     while (1) {
         pid_t helper_pid = -1;
-        int sock = spawn_helper_socket(current_user, &helper_pid);
+        int sock = open_helper_session(current_user, cookie, &helper_pid);
         if (sock < 0) {
-            log_error("cannot spawn helper process");
+            log_error("cannot open helper session");
             goto fail;
         }
-
-        int flags = fcntl(sock, F_GETFL, 0);
-        fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
-
-        write(sock, cookie, strlen(cookie));
-        write(sock, "\n", 1);
 
         char line[LINE_BUF_SIZE];
         int helper_succeeded = 0;
